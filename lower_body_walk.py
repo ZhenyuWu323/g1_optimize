@@ -36,29 +36,25 @@ class LowerBodyWalk(SimpleBipedGaitProblem):
 
     def _create_upper_body_reference_state(self):
         """Create reference state with upper body at default configuration"""
-        ref_state = self.rmodel.defaultState.copy()
-        
-        # Set upper body positions to reference configuration
+        nq = self.rmodel.nq
+        nv = self.rmodel.nv
+        ref_state = np.zeros(nq + nv)
+
+        # Set upper body positions from half_sitting
         q_ref = self.rmodel.referenceConfigurations["half_sitting"]
-        for jid in self.upper_body:
-            jmodel = self.rmodel.joints[jid]
-            if jmodel.nq == 0:
-                continue
-            q_start = jmodel.idx_q
-            for i in range(jmodel.nq):
-                ref_state[q_start + i] = q_ref[q_start + i]
-        
-        # Set upper body velocities to zero
+        ref_state[:nq] = q_ref  
+
+        # Set upper body velocities to zero (already zero)
+        # But we’ll still explicitly set upper body velocity part to 0
         for jid in self.upper_body:
             jmodel = self.rmodel.joints[jid]
             if jmodel.nv == 0:
                 continue
             v_start = jmodel.idx_v
             for i in range(jmodel.nv):
-                ref_state[self.state.nq + v_start + i] = 0.0
-                
+                ref_state[nq + v_start + i] = 0.0
+
         return ref_state
-    
 
     def get_joint_weights(self, upper_body_weight=1e2, lower_body_weight=10.0):
         """Get state weights with very high weights for upper body joints"""

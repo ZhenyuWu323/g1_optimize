@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import crocoddyl
 import pinocchio as pin
 import numpy as np
 
@@ -53,6 +54,10 @@ def load_robot(urdf_name="g1_29dof_rev_1_0_with_inspire_hand_FTP.urdf"):
     q0 = get_half_sitting_pose(robot)
     robot.q0 = q0
     robot.model.referenceConfigurations['half_sitting'] = q0
+
+    # set velocities to zero
+    v0 = np.zeros(robot.model.nv)
+    robot.model.defaultState = np.concatenate([q0, v0])
     return robot
 
 
@@ -64,4 +69,12 @@ def create_init_state(robot):
     return x0
 
 
+def display_solution(robot, ddp):
+    display = crocoddyl.MeshcatDisplay(robot, 4, 4, False)
+    # display the solution
+    display.rate = -1
+    display.freq = 1
+    while True:
+        display.displayFromSolver(ddp)
+        time.sleep(1.0)
 

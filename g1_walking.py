@@ -20,14 +20,12 @@ from crocoddyl.utils.biped import SimpleBipedGaitProblem
 
 
 def create_walking_problem(robot, right_foot, left_foot, init_state):
-    q0 = get_half_sitting_pose(robot)
-    robot.model.referenceConfigurations['half_sitting'] = q0
     gait = SimpleBipedGaitProblem(robot.model, right_foot, left_foot)
     # create initial state
     x0 = init_state
 
     # Creating the walking problem
-    stepLength = 0.3  # meters
+    stepLength = 0.6  # meters
     stepHeight = 0.1  # meters
     timeStep = 0.0375  # seconds
     stepKnots = 20
@@ -64,7 +62,9 @@ def display_solution(robot, ddp):
     # display the solution
     display.rate = -1
     display.freq = 1
-    display.displayFromSolver(ddp)
+    while True:
+        display.displayFromSolver(ddp)
+        time.sleep(1.0)
 
 if __name__ == "__main__":
     # load robot
