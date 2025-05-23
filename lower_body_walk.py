@@ -18,7 +18,7 @@ class LowerBodyWalk(SimpleBipedGaitProblem):
     def get_body_joints(self):
         lower_body = {}
         # NOTE: Now waist is not included in lower body
-        lower_body_keys = ['ankle', 'knee', 'hip', 'waist_yaw_joint']
+        lower_body_keys = ['ankle', 'knee', 'hip']
         upper_body = {}
         # get lower and upper body joints
         for idx, joint in enumerate(self.rmodel.joints):
@@ -44,8 +44,7 @@ class LowerBodyWalk(SimpleBipedGaitProblem):
         q_ref = self.rmodel.referenceConfigurations["half_sitting"]
         ref_state[:nq] = q_ref  
 
-        # Set upper body velocities to zero (already zero)
-        # But we’ll still explicitly set upper body velocity part to 0
+        # Set upper body velocities to zero
         for jid in self.upper_body:
             jmodel = self.rmodel.joints[jid]
             if jmodel.nv == 0:
@@ -53,56 +52,76 @@ class LowerBodyWalk(SimpleBipedGaitProblem):
             v_start = jmodel.idx_v
             for i in range(jmodel.nv):
                 ref_state[nq + v_start + i] = 0.0
-
         return ref_state
 
-    def get_joint_weights(self, upper_body_weight=1e2, lower_body_weight=10.0):
-        """Get state weights with very high weights for upper body joints"""
+
+    def get_joint_weights(self, upper_body_weight=1e2, residual_nr=None):
+        """Get state weights with selective upper/lower body weighting
+        
+        Structure: [0]*3 + [500.0]*3 + [joint_positions] + [joint_velocities]
+        Where joint_positions and joint_velocities are weighted by body part
+        """
+        if residual_nr is None:
+            temp_ref_state = np.zeros(self.state.nx)
+            temp_residual = crocoddyl.ResidualModelState(self.state, temp_ref_state, 0)
+            nr = temp_residual.nr
+        else:
+            nr = residual_nr
+        
         nq = self.state.nq
         nv = self.state.nv
-        stateWeights = np.ones(nq + nv) * lower_body_weight
         
-        # Set high weights for upper body joints (both position and velocity)
-        for jid in self.upper_body:
-            jmodel = self.rmodel.joints[jid]
-            if jmodel.nq == 0:
-                continue
-            
-            # High weight for positions
-            q_start = jmodel.idx_q
-            for i in range(jmodel.nq):
-                stateWeights[q_start + i] = upper_body_weight
-            
-            # High weight for velocities  
-            v_start = jmodel.idx_v
-            for i in range(jmodel.nv):
-                stateWeights[nq + v_start + i] = upper_body_weight
+        stateWeights = np.zeros(nr)
         
-        return stateWeights
-
-
-    def get_control_weights(self, upper_body_ctrl_weight=1e2, lower_body_ctrl_weight=1e-1):
-        """Get control weights with higher weights for upper body actuators"""
-        if self._fwddyn:
-            nu = self.actuation.nu
-            ctrlWeights = np.ones(nu) * lower_body_ctrl_weight
+        # floating base
+        if nr >= 6:
+            stateWeights[0:3] = 0.0      # position x,y,z
+            stateWeights[3:6] = 500.0    # orientation roll,pitch,yaw
+        
+        # Joint positions part: index 6 to (nq-1) in residual space
+        joint_pos_start = 6
+        joint_pos_end = min(nq - 1, nr)  # -1 for quaternion compression
+        
+        if joint_pos_end > joint_pos_start:
+            # lower body weight
+            stateWeights[joint_pos_start:joint_pos_end] = 0.01  # Default lower body weight
             
-            # Set higher weights for upper body actuators
+            # upper body weight
+            for jid in self.upper_body:
+                jmodel = self.rmodel.joints[jid]
+                if jmodel.nq == 0:
+                    continue
+
+                q_start = jmodel.idx_q
+                for i in range(jmodel.nq):
+                    idx = q_start + i
+                    if idx > 6:  
+                        residual_idx = idx - 1 
+                        if joint_pos_start <= residual_idx < joint_pos_end:
+                            stateWeights[residual_idx] = upper_body_weight
+        
+        # Joint velocities part: starts after positions
+        vel_start = nq - 1  
+        vel_end = min(vel_start + nv, nr)
+        
+        if vel_end > vel_start:
+            # lower body weight
+            stateWeights[vel_start:vel_end] = 10.0  # Default velocity weight
+            
+            # upper body weight
             for jid in self.upper_body:
                 jmodel = self.rmodel.joints[jid]
                 if jmodel.nv == 0:
                     continue
                 
-                # Assuming control input order matches joint order
                 v_start = jmodel.idx_v
                 for i in range(jmodel.nv):
-                    if v_start + i < nu:  # Make sure we don't exceed control dimension
-                        ctrlWeights[v_start + i] = upper_body_ctrl_weight
-                        
-            return ctrlWeights
-        else:
-            # For inverse dynamics, control weights are handled differently
-            return None
+                    residual_v_idx = vel_start + v_start + i
+                    if vel_start <= residual_v_idx < vel_end:
+                        stateWeights[residual_v_idx] = upper_body_weight
+        
+        return stateWeights
+
 
     
     def createSwingFootModel(self, timeStep, supportFootIds, comTask=None, swingFootTask=None):
@@ -165,11 +184,15 @@ class LowerBodyWalk(SimpleBipedGaitProblem):
                     self.rmodel.frames[i[0]].name + "_footTrack", footTrack, 1e6
                 )
         
-        # State regularization with custom weights and reference
-        stateWeights = self.get_joint_weights()
+        # state residual
         stateResidual = crocoddyl.ResidualModelState(
-            self.state, self.upper_body_reference_state, nu  # Use custom reference state
+            self.state, self.upper_body_reference_state, nu
         )
+        
+        # state weights
+        stateWeights = self.get_joint_weights(residual_nr=stateResidual.nr)
+        
+        # state activation
         stateActivation = crocoddyl.ActivationModelWeightedQuad(stateWeights**2)
         stateReg = crocoddyl.CostModelResidual(
             self.state, stateActivation, stateResidual
@@ -179,18 +202,11 @@ class LowerBodyWalk(SimpleBipedGaitProblem):
         # Control regularization with custom weights
         if self._fwddyn:
             ctrlResidual = crocoddyl.ResidualModelControl(self.state, nu)
-            ctrlWeights = self.get_control_weights()
-            if ctrlWeights is not None:
-                ctrlActivation = crocoddyl.ActivationModelWeightedQuad(ctrlWeights**2)
-                ctrlReg = crocoddyl.CostModelResidual(self.state, ctrlActivation, ctrlResidual)
-            else:
-                ctrlReg = crocoddyl.CostModelResidual(self.state, ctrlResidual)
         else:
             ctrlResidual = crocoddyl.ResidualModelJointEffort(
                 self.state, self.actuation, nu
             )
-            ctrlReg = crocoddyl.CostModelResidual(self.state, ctrlResidual)
-        
+        ctrlReg = crocoddyl.CostModelResidual(self.state, ctrlResidual)
         costModel.addCost("ctrlReg", ctrlReg, 1e-1)
 
         
@@ -241,7 +257,7 @@ class LowerBodyWalk(SimpleBipedGaitProblem):
     
 
 
-    '''def createPseudoImpulseModel(self, supportFootIds, swingFootTask):
+    def createPseudoImpulseModel(self, supportFootIds, swingFootTask):
         """Create pseudo-impulse model with upper body constraints"""
         # Similar structure to createSwingFootModel but for pseudo-impulse
         if self._fwddyn:
@@ -310,11 +326,15 @@ class LowerBodyWalk(SimpleBipedGaitProblem):
                     1e6,
                 )
         
-        # State regularization with upper body constraints
-        stateWeights = self.get_joint_weights()
+        # state residual
         stateResidual = crocoddyl.ResidualModelState(
             self.state, self.upper_body_reference_state, nu
         )
+        
+        # state weights
+        stateWeights = self.get_joint_weights(residual_nr=stateResidual.nr)
+        
+        # state activation
         stateActivation = crocoddyl.ActivationModelWeightedQuad(stateWeights**2)
         stateReg = crocoddyl.CostModelResidual(
             self.state, stateActivation, stateResidual
@@ -324,19 +344,12 @@ class LowerBodyWalk(SimpleBipedGaitProblem):
         # Control regularization
         if self._fwddyn:
             ctrlResidual = crocoddyl.ResidualModelControl(self.state, nu)
-            ctrlWeights = self.get_control_weights()
-            if ctrlWeights is not None:
-                ctrlActivation = crocoddyl.ActivationModelWeightedQuad(ctrlWeights**2)
-                ctrlReg = crocoddyl.CostModelResidual(self.state, ctrlActivation, ctrlResidual)
-            else:
-                ctrlReg = crocoddyl.CostModelResidual(self.state, ctrlResidual)
         else:
             ctrlResidual = crocoddyl.ResidualModelJointEffort(
                 self.state, self.actuation, nu
             )
-            ctrlReg = crocoddyl.CostModelResidual(self.state, ctrlResidual)
-        
-        costModel.addCost("ctrlReg", ctrlReg, 1e-3)
+        ctrlReg = crocoddyl.CostModelResidual(self.state, ctrlResidual)
+        costModel.addCost("ctrlReg", ctrlReg, 1e-1)
         
         
         # Creating the differential action model
@@ -404,12 +417,15 @@ class LowerBodyWalk(SimpleBipedGaitProblem):
                 costModel.addCost(
                     self.rmodel.frames[i[0]].name + "_footTrack", footTrack, 1e8
                 )
-        
-        # State regularization with upper body constraints
-        stateWeights = self.get_joint_weights(upper_body_weight=1e6, lower_body_weight=10.0)
+        # state residual
         stateResidual = crocoddyl.ResidualModelState(
-            self.state, self.upper_body_reference_state, 0  # Use custom reference state
+            self.state, self.upper_body_reference_state, 0
         )
+        
+        # state weights
+        stateWeights = self.get_joint_weights(residual_nr=stateResidual.nr)
+        
+        # state activation
         stateActivation = crocoddyl.ActivationModelWeightedQuad(stateWeights**2)
         stateReg = crocoddyl.CostModelResidual(
             self.state, stateActivation, stateResidual
@@ -422,4 +438,4 @@ class LowerBodyWalk(SimpleBipedGaitProblem):
         )
         model.JMinvJt_damping = JMinvJt_damping
         model.r_coeff = r_coeff
-        return model'''
+        return model

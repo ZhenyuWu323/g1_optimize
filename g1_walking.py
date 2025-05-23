@@ -17,7 +17,7 @@ import time
 import crocoddyl
 from crocoddyl.utils.biped import SimpleBipedGaitProblem
 
-
+"""Use crocoddyl SimpleBipedGaitProblem to solve the walking problem"""
 
 def create_walking_problem(robot, right_foot, left_foot, init_state):
     gait = SimpleBipedGaitProblem(robot.model, right_foot, left_foot)
