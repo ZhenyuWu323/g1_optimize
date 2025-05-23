@@ -439,3 +439,95 @@ class LowerBodyWalk(SimpleBipedGaitProblem):
         model.JMinvJt_damping = JMinvJt_damping
         model.r_coeff = r_coeff
         return model
+    
+
+    def createCyclicWalkingProblem(
+        self, x0, stepLength, stepHeight, timeStep, stepKnots, supportKnots, 
+        walkingCycles=3, includeInitialStep=True
+    ):
+        """Create a shooting problem for cyclic walking with multiple gait cycles.
+
+        :param x0: initial state
+        :param stepLength: step length
+        :param stepHeight: step height
+        :param timeStep: step time for each knot
+        :param stepKnots: number of knots for step phases
+        :param supportKnots: number of knots for double support phases
+        :param walkingCycles: number of complete gait cycles (right+left step pairs)
+        :param includeInitialStep: whether to include initial half-step for startup
+        :return shooting problem
+        """
+        # Compute the current foot positions
+        q0 = x0[: self.state.nq]
+        pin.forwardKinematics(self.rmodel, self.rdata, q0)
+        pin.updateFramePlacements(self.rmodel, self.rdata)
+        rfPos0 = self.rdata.oMf[self.rfId].translation.copy()
+        lfPos0 = self.rdata.oMf[self.lfId].translation.copy()
+        comRef = (rfPos0 + lfPos0) / 2
+        comRef[2] = pin.centerOfMass(self.rmodel, self.rdata, q0)[2]
+        
+        # Store the action models
+        loco3dModel = []
+        
+        # Initial double support phase
+        doubleSupport = [
+            self.createSwingFootModel(timeStep, [self.rfId, self.lfId])
+            for _ in range(supportKnots)
+        ]
+        loco3dModel += doubleSupport
+        
+        # Optional initial half-step with right foot
+        if includeInitialStep:
+            rStep = self.createFootstepModels(
+                comRef,
+                [rfPos0],
+                0.5 * stepLength,
+                stepHeight,
+                timeStep,
+                stepKnots,
+                [self.lfId],
+                [self.rfId],
+            )
+            loco3dModel += doubleSupport + rStep
+        
+        # Generate complete walking cycles
+        for cycle in range(walkingCycles):
+            print(f"Generating walking cycle {cycle + 1}/{walkingCycles}")
+            
+            # Left foot step
+            lStep = self.createFootstepModels(
+                comRef,
+                [lfPos0],
+                stepLength,
+                stepHeight,
+                timeStep,
+                stepKnots,
+                [self.rfId],
+                [self.lfId],
+            )
+            
+            # Right foot step  
+            rStep = self.createFootstepModels(
+                comRef,
+                [rfPos0],
+                stepLength,
+                stepHeight,
+                timeStep,
+                stepKnots,
+                [self.lfId],
+                [self.rfId],
+            )
+            
+            # Add to sequence: double support + left step + double support + right step
+            loco3dModel += doubleSupport + lStep
+            loco3dModel += doubleSupport + rStep
+        
+        # Final stabilization phase
+        finalSupport = [
+            self.createSwingFootModel(timeStep, [self.rfId, self.lfId])
+            for _ in range(supportKnots * 3)  # Extended final stabilization
+        ]
+        loco3dModel += finalSupport
+        
+        print(f"Created walking problem with {len(loco3dModel)} action models")
+        return crocoddyl.ShootingProblem(x0, loco3dModel[:-1], loco3dModel[-1])

@@ -31,8 +31,11 @@ def create_walking_problem(robot, right_foot, left_foot, init_state):
     timeStep = 0.0375  # seconds
     stepKnots = 20
     supportKnots = 10
-    problem = gait.createWalkingProblem(
+    '''problem = gait.createWalkingProblem(
         x0, stepLength, stepHeight, timeStep, stepKnots, supportKnots
+    )'''
+    problem = gait.createCyclicWalkingProblem(
+        x0, stepLength, stepHeight, timeStep, stepKnots, supportKnots, walkingCycles=2
     )
     return problem
 
